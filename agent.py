@@ -1,18 +1,31 @@
 import requests
+import json
 
 from langgraph_agent import (
     run_rbac_graph,
     resume_rbac_graph
 )
 
-
 # FASTAPI CONFIGURATION
 
-APPROVE_URL = (
-    "http://127.0.0.1:8000/api/approve"
+BASE_URL = "http://127.0.0.1:8000"
+
+ACCESS_URL = (
+    f"{BASE_URL}/api/access"
 )
 
+REQUEST_ACCESS_URL = (
+    f"{BASE_URL}/api/request-access"
+)
+
+APPROVE_URL = (
+    f"{BASE_URL}/api/approve"
+)
+
+
 # START AGENT WORKFLOW
+
+
 def run_agent_workflow(
     user_id: str,
     resource_id: str,
@@ -29,7 +42,13 @@ def run_agent_workflow(
     print("=" * 60)
 
     # Start LangGraph
-    
+    #
+    # LangGraph calls:
+    #
+    # GET /api/access
+    #
+    # This endpoint ONLY checks the current access state.
+    # It does NOT create an approval token.
 
     result = run_rbac_graph(
 
@@ -42,9 +61,7 @@ def run_agent_workflow(
         thread_id=thread_id
     )
 
-    
     # Print result
-    
 
     print("\n")
     print("=" * 60)
@@ -69,8 +86,86 @@ def run_agent_workflow(
     return result
 
 
-# TEAM LEAD APPROVAL
+# CREATE ACCESS REQUEST
 
+def request_access(
+    user_id: str,
+    resource_id: str
+):
+
+    print("\n")
+    print("=" * 60)
+    print("CREATE ACCESS REQUEST")
+    print("=" * 60)
+
+    print(
+        f"User     : {user_id}"
+    )
+
+    print(
+        f"Resource : {resource_id}"
+    )
+
+    try:
+
+        response = requests.post(
+
+            REQUEST_ACCESS_URL,
+
+            json={
+
+                "user_id":
+                    user_id,
+
+                "resource_id":
+                    resource_id
+            },
+
+            timeout=10
+        )
+
+        print(
+            "\nFastAPI Request Status:",
+            response.status_code
+        )
+
+        try:
+
+            data = response.json()
+
+        except ValueError:
+
+            data = {
+                "error":
+                    "Invalid JSON response"
+            }
+
+        print(
+            "FastAPI Request Response:"
+        )
+
+        print(
+            json.dumps(
+                data,
+                indent=2
+            )
+        )
+
+        return response.status_code, data
+
+    except Exception as e:
+
+        print(
+            "\nAccess request failed:",
+            str(e)
+        )
+
+        return 500, {
+            "error": str(e)
+        }
+
+
+# TEAM LEAD APPROVAL
 
 def approve_request(
     approval_token: str
@@ -120,8 +215,6 @@ def approve_request(
             "FastAPI Approval Response:"
         )
 
-        import json
-
         print(
             json.dumps(
                 data,
@@ -142,8 +235,8 @@ def approve_request(
             "error": str(e)
         }
 
-# RESUME AFTER TEAM LEAD APPROVAL
 
+# RESUME AFTER TEAM LEAD APPROVAL
 
 def resume_after_approval(
     thread_id: str
@@ -158,10 +251,8 @@ def resume_after_approval(
         f"Thread ID: {thread_id}"
     )
 
-
     # Command(resume="APPROVED")
     # happens inside resume_rbac_graph()
-   
 
     result = resume_rbac_graph(
 
@@ -186,8 +277,6 @@ def resume_after_approval(
 
     return result
 
-
-
 # COMPLETE APPROVAL FLOW
 
 
@@ -199,10 +288,13 @@ def complete_approval_flow(
     thread_id: str = None
 ):
 
-
     # STEP 1
-    # START WORKFLOW
+    # CHECK CURRENT ACCESS
 
+    print("\n")
+    print("=" * 60)
+    print("STEP 1 — CHECK CURRENT ACCESS")
+    print("=" * 60)
 
     result = run_agent_workflow(
 
@@ -215,28 +307,120 @@ def complete_approval_flow(
         thread_id=thread_id
     )
 
-    # Get approval token from FastAPI response
-  
-    detail = result.get(
-        "rbac_response",
-        {}
-    ).get(
-        "detail",
-        {}
+    # Get current access status
+
+    access_status = result.get(
+        "access_status"
     )
 
-    if not approval_token:
+    approval_status = result.get(
+        "approval_status"
+    )
 
-        approval_token = detail.get(
-            "approval_token"
+    print(
+        "\nCurrent Access Status:",
+        access_status
+    )
+
+    print(
+        "Current Approval Status:",
+        approval_status
+    )
+
+    # STEP 2
+    # CREATE ACCESS REQUEST IF REQUIRED
+
+    if access_status == "GRANTED":
+
+        print(
+            "\nAccess already granted."
         )
 
-    # Get thread ID
+        return result
 
+    # If request is already pending, don't create
+    # another request.
+
+    if approval_status == "PENDING":
+
+        print(
+            "\nApproval request is already pending."
+        )
+
+    else:
+
+        print("\n")
+        print("=" * 60)
+        print("STEP 2 — REQUEST APPROVAL")
+        print("=" * 60)
+
+        request_status_code, request_response = (
+            request_access(
+
+                user_id=user_id,
+
+                resource_id=resource_id
+            )
+        )
+
+        # Request creation failed
+
+        if request_status_code not in (200, 201):
+
+            print(
+                "\nFailed to create access request."
+            )
+
+            return result
+
+        # Get approval token
+
+        approval_token = (
+            request_response.get(
+                "approval_token"
+            )
+        )
+
+        if not approval_token:
+
+            detail = request_response.get(
+                "detail",
+                {}
+            )
+
+            approval_token = (
+                detail.get(
+                    "approval_token"
+                )
+            )
+
+        if not approval_token:
+
+            print(
+                "\nNo approval token returned."
+            )
+
+            return result
+
+        print(
+            "\nApproval Token:",
+            approval_token
+        )
+
+    # STEP 3
+    # CREATE / IDENTIFY THREAD
 
     if not thread_id:
 
-        if original_token:
+        if approval_token:
+
+            thread_id = (
+                f"{user_id}_"
+                f"{resource_id}_"
+                f"{approval_token}"
+            )
+
+        elif original_token:
 
             thread_id = (
                 f"{user_id}_"
@@ -252,10 +436,43 @@ def complete_approval_flow(
                 f"NO_TOKEN"
             )
 
+    print(
+        "\nThread ID:",
+        thread_id
+    )
 
-    # STEP 2
-    # CHECK WHETHER APPROVAL IS REQUIRED
- 
+    # STEP 4
+    # CHECK AGAIN
+    #
+    # The access request now exists in MySQL.
+    #
+    # GET /api/access
+    #
+    # should now return:
+    #
+    # PENDING
+    #
+    # LangGraph will then reach interrupt().
+
+
+    print("\n")
+    print("=" * 60)
+    print("STEP 3 — RECHECK ACCESS")
+    print("=" * 60)
+
+    result = run_agent_workflow(
+
+        user_id=user_id,
+
+        resource_id=resource_id,
+
+        token=approval_token,
+
+        thread_id=thread_id
+    )
+
+    # STEP 5
+    # VERIFY PENDING
 
     approval_status = result.get(
         "approval_status"
@@ -264,21 +481,34 @@ def complete_approval_flow(
     if approval_status != "PENDING":
 
         print(
-            "\nApproval is not pending."
+            "\nExpected PENDING approval."
         )
-
-        return result
-
-    if not approval_token:
 
         print(
-            "\nNo approval token found."
+            "Actual approval status:",
+            approval_status
         )
 
         return result
 
+    print("\n")
+    print("=" * 60)
+    print("WORKFLOW PAUSED")
+    print("=" * 60)
 
-    # STEP 3
+    print(
+        "Waiting for Team Lead approval."
+    )
+
+    print(
+        f"Approval Token: {approval_token}"
+    )
+
+    print(
+        f"Thread ID: {thread_id}"
+    )
+
+    # STEP 6
     # TEAM LEAD APPROVES
 
 
@@ -288,9 +518,7 @@ def complete_approval_flow(
         )
     )
 
-
     # Approval failed
-
 
     if approval_status_code != 200:
 
@@ -300,8 +528,8 @@ def complete_approval_flow(
 
         return result
 
- 
-    # Verify APPROVED
+    # STEP 7
+    # VERIFY APPROVAL
 
 
     if approval_response.get(
@@ -314,14 +542,21 @@ def complete_approval_flow(
 
         return result
 
-    # STEP 4
-    # RESUME LANGGRAPH
+    print("\n")
+    print("=" * 60)
+    print("TEAM LEAD APPROVED")
+    print("=" * 60)
 
+    print(
+        "Status: APPROVED"
+    )
+
+    # STEP 8
+    # RESUME LANGGRAPH
 
     return resume_after_approval(
         thread_id
     )
-
 
 # MAIN
 
@@ -332,13 +567,24 @@ if __name__ == "__main__":
     #
     # U001 has access to R001 through group membership.
     #
-    # Expected:
-    # FastAPI -> 200
-    # RBAC    -> GRANTED
-
+    # Flow:
+    #
+    # User
+    #   ↓
+    # Agent
+    #   ↓
+    # LangGraph
+    #   ↓
+    # GET /api/access
+    #   ↓
+    # GRANTED
+    #
+    # No approval request is created.
 
     run_agent_workflow(
+
         user_id="U001",
+
         resource_id="R001"
     )
 
@@ -346,32 +592,44 @@ if __name__ == "__main__":
     #
     # Flow:
     #
-    # User requests R002
-    #        ↓
-    # FastAPI
-    #        ↓
-    # 403 PENDING
-    #        ↓
-    # LangGraph interrupt()
-    #        ↓
-    # Team Lead approves
-    #        ↓
-    # /api/approve
-    #        ↓
+    # User
+    #   ↓
+    # Agent
+    #   ↓
+    # LangGraph
+    #   ↓
+    # GET /api/access
+    #   ↓
+    # NOT_REQUESTED
+    #   ↓
+    # POST /api/request-access
+    #   ↓
+    # Approval Token Created
+    #   ↓
+    # GET /api/access
+    #   ↓
+    # PENDING
+    #   ↓
+    # interrupt()
+    #   ↓
+    # Team Lead
+    #   ↓
+    # POST /api/approve
+    #   ↓
     # APPROVED
-    #        ↓
+    #   ↓
     # Command(resume="APPROVED")
-    #        ↓
+    #   ↓
     # LangGraph resumes
-    #        ↓
-    # FastAPI with approval token
-    #        ↓
-    # 200 GRANTED
-    #
+    #   ↓
+    # GET /api/access + approved token
+    #   ↓
+    # GRANTED
 
 
     complete_approval_flow(
+
         user_id="U005",
-        resource_id="R002",
-        original_token="TOKEN_AI_PAYROLL_001"
+
+        resource_id="R002"
     )
